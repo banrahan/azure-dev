@@ -403,7 +403,11 @@ func newInitCommand(extCtx *azdext.ExtensionContext) *cobra.Command {
 						return err
 					}
 
-					switch selectedTemplate.EffectiveType() {
+					effectiveType := selectedTemplate.EffectiveType()
+				log.Printf("[LOCAL-DEBUG] selected template: title=%q source=%q effectiveType=%q",
+					selectedTemplate.Title, selectedTemplate.Source, effectiveType)
+
+				switch effectiveType {
 					case TemplateTypeAzd:
 						// Full azd template - dispatch azd init -t <repo>
 						initArgs := []string{"init", "-t", selectedTemplate.Source, "."}
@@ -472,6 +476,7 @@ func newInitCommand(extCtx *azdext.ExtensionContext) *cobra.Command {
 
 					default:
 						// Agent manifest template - use existing -m flow
+						log.Printf("[LOCAL-DEBUG] using agent manifest flow, manifestPointer=%q", selectedTemplate.Source)
 						flags.manifestPointer = selectedTemplate.Source
 						if err := runInitFromManifest(ctx, flags, azdClient, httpClient); err != nil {
 							if exterrors.IsCancellation(err) {
@@ -616,6 +621,11 @@ func (a *InitAction) Run(ctx context.Context) error {
 		if err := a.addToProject(ctx, targetDir, agentManifest); err != nil {
 			return fmt.Errorf("failed to add agent to azure.yaml: %w", err)
 		}
+
+		// Promote agent instruction files (CLAUDE.md, .github/copilot-instructions.md)
+		// from the sample's src/ directory to the project root so that AI coding
+		// assistants pick them up automatically.
+		promoteAgentInstructions(targetDir)
 
 		color.Green("\nAI agent definition added to your azd project successfully!")
 	}
@@ -1162,7 +1172,9 @@ func (a *InitAction) downloadAgentYaml(
 	useGhCli := false
 
 	// Check if manifestPointer is a local file path or a URI
-	if a.isLocalFilePath(manifestPointer) {
+	isLocal := a.isLocalFilePath(manifestPointer)
+	log.Printf("[LOCAL-DEBUG] downloadAgentYaml: manifestPointer=%q isLocal=%v isGitHubUrl=%v", manifestPointer, isLocal, a.isGitHubUrl(manifestPointer))
+	if isLocal {
 		// Guard against directories (defense in depth — the caller should
 		// have caught this already, but check here for safety).
 		if err := checkNotDirectory(manifestPointer); err != nil {
@@ -1386,6 +1398,7 @@ func (a *InitAction) downloadAgentYaml(
 	if a.isLocalFilePath(manifestPointer) {
 		// Check if the template is a ContainerAgent
 		_, isHostedContainer := agentManifest.Template.(agent_yaml.ContainerAgent)
+		log.Printf("[LOCAL-DEBUG] local file path: isHostedContainer=%v templateType=%T", isHostedContainer, agentManifest.Template)
 
 		if isHostedContainer {
 			// For container agents, copy the entire parent directory.
@@ -1399,8 +1412,9 @@ func (a *InitAction) downloadAgentYaml(
 			if err != nil {
 				return nil, "", fmt.Errorf("resolving target directory %s: %w", targetDir, err)
 			}
+			log.Printf("[LOCAL-DEBUG] copyDirectory: srcAbs=%q dstAbs=%q isSamePath=%v", srcAbs, dstAbs, isSamePath(srcAbs, dstAbs))
 			if !isSamePath(srcAbs, dstAbs) {
-				log.Print("Copying full directory for container agent")
+				log.Print("[LOCAL-DEBUG] Copying full directory for container agent")
 				err := copyDirectory(manifestDir, targetDir)
 				if err != nil {
 					return nil, "", fmt.Errorf("copying parent directory: %w", err)
@@ -1426,6 +1440,58 @@ func (a *InitAction) downloadAgentYaml(
 	}
 
 	return agentManifest, targetDir, nil
+}
+
+// promoteAgentInstructions copies AI coding assistant instruction files from
+// the agent sample directory (targetDir) to the project root so they are
+// discovered automatically. Files are only promoted when they exist in the
+// sample and do NOT already exist at the project root.
+func promoteAgentInstructions(targetDir string) {
+	// Instruction files to promote: source path relative to targetDir → destination relative to project root
+	promotions := []struct{ src, dst string }{
+		{"CLAUDE.md", "CLAUDE.md"},
+		{filepath.Join(".github", "copilot-instructions.md"), filepath.Join(".github", "copilot-instructions.md")},
+	}
+
+	for _, p := range promotions {
+		srcPath := filepath.Join(targetDir, p.src)
+		dstPath := p.dst
+
+		// Only promote if source exists
+		if _, err := os.Stat(srcPath); err != nil {
+			continue
+		}
+
+		// Don't overwrite existing files at the project root
+		if _, err := os.Stat(dstPath); err == nil {
+			log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: skipping %s (already exists at root)", p.dst)
+			continue
+		}
+
+		// Ensure destination directory exists
+		if dir := filepath.Dir(dstPath); dir != "." {
+			//nolint:gosec // project scaffold directory
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: failed to create dir %s: %v", dir, err)
+				continue
+			}
+		}
+
+		//nolint:gosec // copying user-provided instruction files within the project
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: failed to read %s: %v", srcPath, err)
+			continue
+		}
+
+		if err := os.WriteFile(dstPath, data, 0600); err != nil {
+			log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: failed to write %s: %v", dstPath, err)
+			continue
+		}
+
+		log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: promoted %s → %s", srcPath, dstPath)
+		fmt.Printf("  Copied %s to project root\n", p.src)
+	}
 }
 
 // writeAgentDefinitionFile writes the agent definition to disk as agent.yaml in targetDir.
