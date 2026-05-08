@@ -627,6 +627,15 @@ func (a *InitAction) Run(ctx context.Context) error {
 		// assistants pick them up automatically.
 		promoteAgentInstructions(targetDir)
 
+		// Clone Copilot skills for Foundry agents into the project when enabled.
+		if _, ok := os.LookupEnv("AZD_AGENT_CLONE_SKILLS"); ok {
+			if err := cloneFoundrySkills(ctx, a.httpClient); err != nil {
+				// Non-fatal — log and continue
+				log.Printf("[LOCAL-DEBUG] cloneFoundrySkills failed: %v", err)
+				fmt.Println(output.WithWarningFormat("Could not download Copilot skills: %s", err))
+			}
+		}
+
 		color.Green("\nAI agent definition added to your azd project successfully!")
 	}
 
@@ -1492,6 +1501,54 @@ func promoteAgentInstructions(targetDir string) {
 		log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: promoted %s → %s", srcPath, dstPath)
 		fmt.Printf("  Copied %s to project root\n", p.src)
 	}
+}
+
+const (
+	// Default repo and path for Foundry agent Copilot skills.
+	skillsRepo   = "microsoft/GitHub-Copilot-for-Azure"
+	skillsPath   = "plugin/skills/microsoft-foundry/foundry-agent"
+	skillsBranch = "main"
+	skillsDest   = ".github/skills/foundry-agent"
+)
+
+// cloneFoundrySkills downloads Copilot skills for Foundry agents from the
+// microsoft/GitHub-Copilot-for-Azure repo into .github/skills/foundry-agent/
+// at the project root. Controlled by the AZD_AGENT_CLONE_SKILLS env var.
+// The env var value can optionally override the repo (e.g. "myorg/myrepo")
+// or be set to "true"/empty to use the default.
+func cloneFoundrySkills(ctx context.Context, httpClient *http.Client) error {
+	repo := skillsRepo
+	if override, ok := os.LookupEnv("AZD_AGENT_CLONE_SKILLS"); ok && override != "" &&
+		override != "true" && override != "1" {
+		repo = override
+	}
+
+	// Skip if skills directory already exists
+	if _, err := os.Stat(skillsDest); err == nil {
+		log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: %s already exists, skipping", skillsDest)
+		fmt.Println(output.WithGrayFormat("Copilot skills already present, skipping download."))
+		return nil
+	}
+
+	fmt.Println(output.WithGrayFormat("Downloading Copilot skills for Foundry agents..."))
+	log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: repo=%s path=%s branch=%s dest=%s",
+		repo, skillsPath, skillsBranch, skillsDest)
+
+	//nolint:gosec // skills directory should be readable by project tooling
+	if err := os.MkdirAll(skillsDest, 0755); err != nil {
+		return fmt.Errorf("creating skills directory %s: %w", skillsDest, err)
+	}
+
+	if err := downloadDirectoryContentsWithoutGhCli(
+		ctx, repo, skillsPath, skillsPath, skillsBranch, skillsDest, httpClient,
+	); err != nil {
+		// Clean up partial download
+		_ = os.RemoveAll(skillsDest)
+		return fmt.Errorf("downloading skills from %s: %w", repo, err)
+	}
+
+	fmt.Println(output.WithGrayFormat("Copilot skills downloaded to %s", skillsDest))
+	return nil
 }
 
 // writeAgentDefinitionFile writes the agent definition to disk as agent.yaml in targetDir.
