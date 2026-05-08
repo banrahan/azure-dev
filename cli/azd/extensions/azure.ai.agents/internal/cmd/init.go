@@ -1539,7 +1539,7 @@ func cloneFoundrySkills(ctx context.Context, httpClient *http.Client) error {
 		return fmt.Errorf("creating skills directory %s: %w", skillsDest, err)
 	}
 
-	if err := downloadDirectoryContentsWithoutGhCli(
+	if err := downloadDirectoryQuiet(
 		ctx, repo, skillsPath, skillsPath, skillsBranch, skillsDest, httpClient,
 	); err != nil {
 		// Clean up partial download
@@ -1548,6 +1548,106 @@ func cloneFoundrySkills(ctx context.Context, httpClient *http.Client) error {
 	}
 
 	fmt.Println(output.WithGrayFormat("Copilot skills downloaded to %s", skillsDest))
+	return nil
+}
+
+// downloadDirectoryQuiet recursively downloads a GitHub directory via the
+// public API, logging file names instead of printing them to stdout.
+func downloadDirectoryQuiet(
+	ctx context.Context, repoSlug, dirPath, rootDirPath, branch, localPath string,
+	httpClient *http.Client,
+) error {
+	apiUrl := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s", repoSlug, dirPath)
+	if branch != "" {
+		apiUrl += fmt.Sprintf("?ref=%s", branch)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiUrl, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to get directory contents: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to get directory contents: status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read directory contents response: %w", err)
+	}
+
+	var dirContents []map[string]any
+	if err := json.Unmarshal(body, &dirContents); err != nil {
+		return fmt.Errorf("failed to parse directory contents JSON: %w", err)
+	}
+
+	for _, item := range dirContents {
+		name, _ := item["name"].(string)
+		itemType, _ := item["type"].(string)
+		if name == "" || itemType == "" {
+			continue
+		}
+
+		itemPath := fmt.Sprintf("%s/%s", dirPath, name)
+		itemLocalPath := filepath.Join(localPath, name)
+
+		if itemType == "file" {
+			log.Printf("[LOCAL-DEBUG] skills: downloading %s", itemPath)
+			fileURL := &url.URL{
+				Scheme: "https",
+				Host:   "api.github.com",
+				Path:   fmt.Sprintf("/repos/%s/contents/%s", repoSlug, itemPath),
+			}
+			if branch != "" {
+				query := url.Values{}
+				query.Set("ref", branch)
+				fileURL.RawQuery = query.Encode()
+			}
+
+			fileReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL.String(), nil)
+			if err != nil {
+				return fmt.Errorf("failed to create file request %s: %w", itemPath, err)
+			}
+			fileReq.Header.Set("Accept", "application/vnd.github.v3.raw")
+
+			fileResp, err := httpClient.Do(fileReq)
+			if err != nil {
+				return fmt.Errorf("failed to download file %s: %w", itemPath, err)
+			}
+
+			if fileResp.StatusCode != http.StatusOK {
+				_ = fileResp.Body.Close()
+				return fmt.Errorf("failed to download file %s: status %d", itemPath, fileResp.StatusCode)
+			}
+
+			fileContent, err := io.ReadAll(fileResp.Body)
+			_ = fileResp.Body.Close()
+			if err != nil {
+				return fmt.Errorf("failed to read file content %s: %w", itemPath, err)
+			}
+
+			//nolint:gosec // downloaded skill files are intended to be readable by project tooling
+			if err := os.WriteFile(itemLocalPath, fileContent, 0644); err != nil {
+				return fmt.Errorf("failed to write file %s: %w", itemLocalPath, err)
+			}
+		} else if itemType == "dir" {
+			//nolint:gosec // skills subdirectory
+			if err := os.MkdirAll(itemLocalPath, 0755); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", itemLocalPath, err)
+			}
+			if err := downloadDirectoryQuiet(ctx, repoSlug, itemPath, rootDirPath, branch, itemLocalPath, httpClient); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
