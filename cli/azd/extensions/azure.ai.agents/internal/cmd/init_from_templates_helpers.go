@@ -119,10 +119,76 @@ func dirIsEmpty(dir string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
-// fetchAgentTemplates retrieves the agent template catalog from the remote
-// awesome-azd manifest URL.
+// localTemplatesEnvVar is the environment variable that, when set, points to a
+// local JSON file containing agent templates (same schema as the remote
+// catalog). Source paths in the file are resolved relative to the JSON file's
+// parent directory.
+const localTemplatesEnvVar = "AZD_AGENT_TEMPLATES_PATH"
+
+// fetchAgentTemplates retrieves the agent template catalog. When the
+// AZD_AGENT_TEMPLATES_PATH environment variable is set it reads from a local
+// JSON file; otherwise it fetches the remote awesome-azd manifest.
 func fetchAgentTemplates(ctx context.Context, httpClient *http.Client) ([]AgentTemplate, error) {
+	if localPath, ok := os.LookupEnv(localTemplatesEnvVar); ok && localPath != "" {
+		log.Printf("using local agent templates catalog: %s", localPath)
+		return fetchAgentTemplatesFromFile(localPath)
+	}
 	return fetchAgentTemplatesFromURL(ctx, httpClient, agentTemplatesURL)
+}
+
+// fetchAgentTemplatesFromFile reads an agent template catalog from a local JSON
+// file. The file must contain an array of AgentTemplate objects using the same
+// schema as the remote catalog. Source paths are resolved relative to the JSON
+// file's parent directory so that entries like "./samples/echo/agent.yaml" work.
+func fetchAgentTemplatesFromFile(path string) ([]AgentTemplate, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolving absolute path for %s: %w", path, err)
+	}
+
+	//nolint:gosec // path is from an explicit env var set by the developer
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading local templates file %s: %w", absPath, err)
+	}
+
+	var all []AgentTemplate
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, fmt.Errorf("parsing local templates file %s: %w", absPath, err)
+	}
+
+	baseDir := filepath.Dir(absPath)
+
+	filtered := make([]AgentTemplate, 0, len(all))
+	for _, t := range all {
+		if t.TemplateType != templateTypeExtensionAIAgent {
+			continue
+		}
+		// Resolve relative source paths against the catalog file's directory.
+		if t.Source != "" && !filepath.IsAbs(t.Source) && !isURL(t.Source) {
+			t.Source = filepath.Join(baseDir, t.Source)
+		}
+		filtered = append(filtered, t)
+	}
+
+	log.Printf(
+		"local agent templates: loaded %d entries, %d matched templateType=%q",
+		len(all), len(filtered), templateTypeExtensionAIAgent,
+	)
+
+	if len(all) > 0 && len(filtered) == 0 {
+		return nil, fmt.Errorf(
+			"local templates file %s contained %d entries but none had templateType=%q",
+			absPath, len(all), templateTypeExtensionAIAgent,
+		)
+	}
+
+	return filtered, nil
+}
+
+// isURL returns true if s looks like an HTTP(S) URL.
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 // fetchAgentTemplatesFromURL retrieves the awesome-azd templates manifest from

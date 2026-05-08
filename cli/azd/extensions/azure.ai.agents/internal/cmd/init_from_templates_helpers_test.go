@@ -209,6 +209,153 @@ func TestFetchAgentTemplates(t *testing.T) {
 	})
 }
 
+func TestFetchAgentTemplatesFromFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("loads and filters local catalog", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+
+		// Create a sample agent.yaml that the source field will point to
+		samplesDir := filepath.Join(dir, "samples", "echo")
+		require.NoError(t, os.MkdirAll(samplesDir, 0700))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(samplesDir, "agent.yaml"),
+			[]byte("name: echo-agent\ntemplate:\n  kind: hosted\n  name: echo\n"),
+			0600,
+		))
+
+		catalog := []map[string]any{
+			{
+				"title":              "Echo Agent",
+				"description":        "A simple echo agent",
+				"languages":          []string{"python"},
+				"extensionFramework": "Agent Framework",
+				"source":             "samples/echo/agent.yaml",
+				"templateType":       "extension.ai.agent",
+			},
+			{
+				"title":        "Gallery Entry",
+				"languages":    []string{"python"},
+				"source":       "Azure-Samples/some-template",
+				"templateType": "gallery",
+			},
+		}
+
+		data, err := json.Marshal(catalog)
+		require.NoError(t, err)
+
+		catalogPath := filepath.Join(dir, "templates.json")
+		require.NoError(t, os.WriteFile(catalogPath, data, 0600))
+
+		result, err := fetchAgentTemplatesFromFile(catalogPath)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		require.Equal(t, "Echo Agent", result[0].Title)
+		// Source should be resolved to absolute path
+		require.Equal(t, filepath.Join(dir, "samples", "echo", "agent.yaml"), result[0].Source)
+	})
+
+	t.Run("absolute source paths left unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		absSource := filepath.Join(dir, "absolute", "agent.yaml")
+
+		catalog := []map[string]any{
+			{
+				"title":        "Abs Agent",
+				"languages":    []string{"python"},
+				"source":       absSource,
+				"templateType": "extension.ai.agent",
+			},
+		}
+
+		data, err := json.Marshal(catalog)
+		require.NoError(t, err)
+
+		catalogPath := filepath.Join(dir, "templates.json")
+		require.NoError(t, os.WriteFile(catalogPath, data, 0600))
+
+		result, err := fetchAgentTemplatesFromFile(catalogPath)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		require.Equal(t, absSource, result[0].Source)
+	})
+
+	t.Run("URL source paths left unchanged", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+
+		catalog := []map[string]any{
+			{
+				"title":        "Remote Agent",
+				"languages":    []string{"python"},
+				"source":       "https://github.com/org/repo/blob/main/agent.yaml",
+				"templateType": "extension.ai.agent",
+			},
+		}
+
+		data, err := json.Marshal(catalog)
+		require.NoError(t, err)
+
+		catalogPath := filepath.Join(dir, "templates.json")
+		require.NoError(t, os.WriteFile(catalogPath, data, 0600))
+
+		result, err := fetchAgentTemplatesFromFile(catalogPath)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		require.Equal(t, "https://github.com/org/repo/blob/main/agent.yaml", result[0].Source)
+	})
+
+	t.Run("no matching templateType returns error", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+
+		catalog := []map[string]any{
+			{
+				"title":        "Gallery Only",
+				"languages":    []string{"python"},
+				"source":       "Azure-Samples/some-template",
+				"templateType": "gallery",
+			},
+		}
+
+		data, err := json.Marshal(catalog)
+		require.NoError(t, err)
+
+		catalogPath := filepath.Join(dir, "templates.json")
+		require.NoError(t, os.WriteFile(catalogPath, data, 0600))
+
+		_, err = fetchAgentTemplatesFromFile(catalogPath)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "extension.ai.agent")
+	})
+
+	t.Run("missing file returns error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := fetchAgentTemplatesFromFile("/nonexistent/path/templates.json")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "reading local templates file")
+	})
+
+	t.Run("invalid JSON returns error", func(t *testing.T) {
+		t.Parallel()
+
+		dir := t.TempDir()
+		catalogPath := filepath.Join(dir, "templates.json")
+		require.NoError(t, os.WriteFile(catalogPath, []byte("not json"), 0600))
+
+		_, err := fetchAgentTemplatesFromFile(catalogPath)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "parsing local templates file")
+	})
+}
+
 func TestFindAgentManifest(t *testing.T) {
 	t.Parallel()
 
