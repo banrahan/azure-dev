@@ -113,8 +113,9 @@ func (s *promptService) Select(ctx context.Context, req *azdext.SelectRequest) (
 	choices := make([]*ux.SelectChoice, len(req.Options.Choices))
 	for i, choice := range req.Options.Choices {
 		choices[i] = &ux.SelectChoice{
-			Value: choice.Value,
-			Label: choice.Label,
+			Value:  choice.Value,
+			Label:  choice.Label,
+			Detail: choice.GetDetail(),
 		}
 	}
 

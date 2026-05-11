@@ -44,8 +44,9 @@ type SelectOptions struct {
 }
 
 type SelectChoice struct {
-	Value string
-	Label string
+	Value  string
+	Label  string
+	Detail string
 }
 
 type indexedSelectChoice struct {
@@ -308,6 +309,18 @@ func (p *Select) renderOptions(printer Printer, indent string) {
 			printer.Fprintf("%s  ...\n", indent)
 		}
 	}
+
+	// Show detail text for the currently highlighted choice
+	if selected >= 0 && selected < filteredOptionsCount {
+		detail := p.filteredChoices[selected].Detail
+		if detail != "" {
+			printer.Fprintln()
+			printer.Fprintf("%s  ─────────────────────────────────\n", indent)
+			prefix := indent + "  "
+			wrapped := wrapText(detail, prefix, ConsoleWidth())
+			printer.Fprintf("%s\n", wrapped)
+		}
+	}
 }
 
 func (p *Select) renderValidation(printer Printer) {
@@ -410,4 +423,69 @@ func (p *Select) renderFooter(printer Printer) {
 	} else {
 		printer.Fprintln(output.WithGrayFormat("Use arrows to move"))
 	}
+}
+
+// renderDetail shows the Detail text of the currently highlighted choice,
+// displayed as gray text below the option list.
+func (p *Select) renderDetail(printer Printer) {
+	if p.cancelled || p.complete {
+		return
+	}
+
+	if p.currentIndex == nil || len(p.filteredChoices) == 0 {
+		return
+	}
+
+	selected := p.filteredChoices[*p.currentIndex]
+	detail := selected.Detail
+	if detail == "" {
+		// Debug: show that we reached here but detail is empty
+		printer.Fprintln()
+		printer.Fprintln(output.WithGrayFormat("  [no detail for: %s]", selected.Label))
+		return
+	}
+
+	printer.Fprintln()
+	printer.Fprintln(output.WithGrayFormat("  %s", detail))
+}
+
+// wrapText wraps text to fit within maxWidth, using prefix as the indent for
+// every line (including the first). Words are split on spaces.
+func wrapText(text, prefix string, maxWidth int) string {
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+
+	usable := maxWidth - len(prefix)
+	if usable <= 10 {
+		return prefix + text
+	}
+
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return prefix
+	}
+
+	var lines []string
+	line := prefix
+
+	for _, word := range words {
+		// Would adding this word exceed the width?
+		if len(line)+1+len(word) > maxWidth && len(line) > len(prefix) {
+			lines = append(lines, line)
+			line = prefix + word
+		} else {
+			if len(line) == len(prefix) {
+				line += word
+			} else {
+				line += " " + word
+			}
+		}
+	}
+
+	if len(line) > len(prefix) {
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n")
 }

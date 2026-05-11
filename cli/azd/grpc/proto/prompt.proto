@@ -165,6 +165,7 @@ message PromptOptions {
 message SelectChoice {
   string value = 1;
   string label = 2;
+  optional string detail = 3;
 }
 
 message MultiSelectChoice {
