@@ -436,10 +436,14 @@ func promptSelectTemplate(
 ) (*AgentTemplate, error) {
 	choices := make([]*azdext.SelectChoice, len(templates))
 	for i, t := range templates {
-		choices[i] = &azdext.SelectChoice{
+		choice := &azdext.SelectChoice{
 			Label: t.Title,
 			Value: fmt.Sprintf("%d", i),
 		}
+		if t.Description != "" {
+			choice.Detail = &t.Description
+		}
+		choices[i] = choice
 	}
 
 	if includeSeeAll {
