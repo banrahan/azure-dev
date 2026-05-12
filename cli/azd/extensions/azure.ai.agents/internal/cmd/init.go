@@ -1499,7 +1499,6 @@ func promoteAgentInstructions(targetDir string) {
 		}
 
 		log.Printf("[LOCAL-DEBUG] promoteAgentInstructions: promoted %s → %s", srcPath, dstPath)
-		fmt.Printf("  Copied %s to project root\n", p.src)
 	}
 }
 
