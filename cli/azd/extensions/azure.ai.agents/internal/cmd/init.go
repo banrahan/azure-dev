@@ -1527,11 +1527,11 @@ func cloneFoundrySkills(ctx context.Context, httpClient *http.Client, projectRoo
 	// Skip if skills directory already exists
 	if _, err := os.Stat(dest); err == nil {
 		log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: %s already exists, skipping", dest)
-		fmt.Println(output.WithGrayFormat("Copilot skills already present, skipping download."))
+		fmt.Println("Copilot skills already present, skipping download.")
 		return nil
 	}
 
-	fmt.Println(output.WithGrayFormat("Downloading Copilot skills for Foundry agents..."))
+	fmt.Println("Downloading Copilot skills for Foundry agents...")
 	log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: repo=%s path=%s branch=%s dest=%s",
 		repo, skillsPath, skillsBranch, dest)
 
@@ -1548,7 +1548,7 @@ func cloneFoundrySkills(ctx context.Context, httpClient *http.Client, projectRoo
 		return fmt.Errorf("downloading skills from %s: %w", repo, err)
 	}
 
-	fmt.Println(output.WithGrayFormat("Copilot skills downloaded to %s", dest))
+	fmt.Printf("Copilot skills downloaded to %s\n", dest)
 	return nil
 }
 
@@ -1818,24 +1818,25 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		"\nAdded your agent as a service entry named '%s' under the file azure.yaml.\n",
 		a.serviceNameOverride,
 	)
+
+	// If the project was created in a subdirectory, tell the user to cd into it first.
+	if projResp, err := a.azdClient.Project().Get(ctx, &azdext.EmptyRequest{}); err == nil &&
+		projResp.Project != nil {
+		cwd, _ := os.Getwd()
+		if cwd != "" && projResp.Project.Path != cwd {
+			fmt.Printf("\nFirst, change into the project directory:\n  %s\n",
+				color.HiBlueString("cd %s", projResp.Project.Path))
+		}
+	}
+
 	if projectID, _ := a.azdClient.Environment().GetValue(ctx, &azdext.GetEnvRequest{
 		EnvName: a.environment.Name,
 		Key:     "AZURE_AI_PROJECT_ID",
 	}); projectID != nil && projectID.Value != "" {
-		fmt.Printf("To deploy your agent, use %s.\n",
+		fmt.Printf("\nTo deploy your agent, use %s.\n",
 			color.HiBlueString("azd deploy %s", a.serviceNameOverride))
 	} else {
-		fmt.Printf("To Provision and deploy the whole solution: \n")
-		// If the project was created in a subdirectory, tell the user to cd into it first.
-		if projResp, err := a.azdClient.Project().Get(ctx, &azdext.EmptyRequest{}); err == nil &&
-			projResp.Project != nil {
-			cwd, _ := os.Getwd()
-			if cwd != "" && projResp.Project.Path != cwd {
-				fmt.Printf("%s\n",
-					color.HiBlueString("cd %s", projResp.Project.Path))
-			}
-		}
-		fmt.Printf(
+		fmt.Printf("\nTo provision and deploy the whole solution, use %s.\n",
 			color.HiBlueString("azd up"),
 		)
 	}
