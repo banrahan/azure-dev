@@ -1369,10 +1369,10 @@ func (a *InitAction) downloadAgentYaml(
 	agentId := agentManifest.Name
 	serviceName := strings.ReplaceAll(agentId, " ", "")
 
-	// Use targetDir if provided, otherwise default to "src/{agentId}"
+	// Use targetDir if provided, otherwise default to "src/{agentId}" under the project root
 	autoDir := targetDir == ""
 	if autoDir {
-		targetDir = filepath.Join("src", agentId)
+		targetDir = filepath.Join(a.projectConfig.Path, "src", agentId)
 	}
 
 	// When the target directory was auto-computed (no --src flag), check for
