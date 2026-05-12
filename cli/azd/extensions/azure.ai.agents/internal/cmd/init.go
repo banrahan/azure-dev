@@ -404,10 +404,10 @@ func newInitCommand(extCtx *azdext.ExtensionContext) *cobra.Command {
 					}
 
 					effectiveType := selectedTemplate.EffectiveType()
-				log.Printf("[LOCAL-DEBUG] selected template: title=%q source=%q effectiveType=%q",
-					selectedTemplate.Title, selectedTemplate.Source, effectiveType)
+					log.Printf("[LOCAL-DEBUG] selected template: title=%q source=%q effectiveType=%q",
+						selectedTemplate.Title, selectedTemplate.Source, effectiveType)
 
-				switch effectiveType {
+					switch effectiveType {
 					case TemplateTypeAzd:
 						// Full azd template - dispatch azd init -t <repo>
 						initArgs := []string{"init", "-t", selectedTemplate.Source}
@@ -625,11 +625,11 @@ func (a *InitAction) Run(ctx context.Context) error {
 		// Promote agent instruction files (CLAUDE.md, .github/copilot-instructions.md)
 		// from the sample's src/ directory to the project root so that AI coding
 		// assistants pick them up automatically.
-		promoteAgentInstructions(targetDir)
+		promoteAgentInstructions(targetDir, a.projectConfig.Path)
 
 		// Clone Copilot skills for Foundry agents into the project when enabled.
 		if _, ok := os.LookupEnv("AZD_AGENT_CLONE_SKILLS"); ok {
-			if err := cloneFoundrySkills(ctx, a.httpClient); err != nil {
+			if err := cloneFoundrySkills(ctx, a.httpClient, a.projectConfig.Path); err != nil {
 				// Non-fatal — log and continue
 				log.Printf("[LOCAL-DEBUG] cloneFoundrySkills failed: %v", err)
 				fmt.Println(output.WithWarningFormat("Could not download Copilot skills: %s", err))
@@ -1455,7 +1455,7 @@ func (a *InitAction) downloadAgentYaml(
 // the agent sample directory (targetDir) to the project root so they are
 // discovered automatically. Files are only promoted when they exist in the
 // sample and do NOT already exist at the project root.
-func promoteAgentInstructions(targetDir string) {
+func promoteAgentInstructions(targetDir, projectRoot string) {
 	// Instruction files to promote: source path relative to targetDir → destination relative to project root
 	promotions := []struct{ src, dst string }{
 		{"CLAUDE.md", "CLAUDE.md"},
@@ -1464,7 +1464,7 @@ func promoteAgentInstructions(targetDir string) {
 
 	for _, p := range promotions {
 		srcPath := filepath.Join(targetDir, p.src)
-		dstPath := p.dst
+		dstPath := filepath.Join(projectRoot, p.dst)
 
 		// Only promote if source exists
 		if _, err := os.Stat(srcPath); err != nil {
@@ -1515,38 +1515,40 @@ const (
 // at the project root. Controlled by the AZD_AGENT_CLONE_SKILLS env var.
 // The env var value can optionally override the repo (e.g. "myorg/myrepo")
 // or be set to "true"/empty to use the default.
-func cloneFoundrySkills(ctx context.Context, httpClient *http.Client) error {
+func cloneFoundrySkills(ctx context.Context, httpClient *http.Client, projectRoot string) error {
 	repo := skillsRepo
 	if override, ok := os.LookupEnv("AZD_AGENT_CLONE_SKILLS"); ok && override != "" &&
 		override != "true" && override != "1" {
 		repo = override
 	}
 
+	dest := filepath.Join(projectRoot, skillsDest)
+
 	// Skip if skills directory already exists
-	if _, err := os.Stat(skillsDest); err == nil {
-		log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: %s already exists, skipping", skillsDest)
+	if _, err := os.Stat(dest); err == nil {
+		log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: %s already exists, skipping", dest)
 		fmt.Println(output.WithGrayFormat("Copilot skills already present, skipping download."))
 		return nil
 	}
 
 	fmt.Println(output.WithGrayFormat("Downloading Copilot skills for Foundry agents..."))
 	log.Printf("[LOCAL-DEBUG] cloneFoundrySkills: repo=%s path=%s branch=%s dest=%s",
-		repo, skillsPath, skillsBranch, skillsDest)
+		repo, skillsPath, skillsBranch, dest)
 
 	//nolint:gosec // skills directory should be readable by project tooling
-	if err := os.MkdirAll(skillsDest, 0755); err != nil {
-		return fmt.Errorf("creating skills directory %s: %w", skillsDest, err)
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return fmt.Errorf("creating skills directory %s: %w", dest, err)
 	}
 
 	if err := downloadDirectoryQuiet(
-		ctx, repo, skillsPath, skillsPath, skillsBranch, skillsDest, httpClient,
+		ctx, repo, skillsPath, skillsPath, skillsBranch, dest, httpClient,
 	); err != nil {
 		// Clean up partial download
-		_ = os.RemoveAll(skillsDest)
+		_ = os.RemoveAll(dest)
 		return fmt.Errorf("downloading skills from %s: %w", repo, err)
 	}
 
-	fmt.Println(output.WithGrayFormat("Copilot skills downloaded to %s", skillsDest))
+	fmt.Println(output.WithGrayFormat("Copilot skills downloaded to %s", dest))
 	return nil
 }
 
@@ -1823,17 +1825,17 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		fmt.Printf("To deploy your agent, use %s.\n",
 			color.HiBlueString("azd deploy %s", a.serviceNameOverride))
 	} else {
+		fmt.Printf("To Provision and deploy the whole solution: \n")
 		// If the project was created in a subdirectory, tell the user to cd into it first.
 		if projResp, err := a.azdClient.Project().Get(ctx, &azdext.EmptyRequest{}); err == nil &&
 			projResp.Project != nil {
 			cwd, _ := os.Getwd()
 			if cwd != "" && projResp.Project.Path != cwd {
-				fmt.Printf("\nFirst, change into the project directory:\n  %s\n\n",
+				fmt.Printf("%s\n",
 					color.HiBlueString("cd %s", projResp.Project.Path))
 			}
 		}
 		fmt.Printf(
-			"To provision and deploy the whole solution, use %s.\n",
 			color.HiBlueString("azd up"),
 		)
 	}
