@@ -410,7 +410,7 @@ func newInitCommand(extCtx *azdext.ExtensionContext) *cobra.Command {
 				switch effectiveType {
 					case TemplateTypeAzd:
 						// Full azd template - dispatch azd init -t <repo>
-						initArgs := []string{"init", "-t", selectedTemplate.Source, "."}
+						initArgs := []string{"init", "-t", selectedTemplate.Source}
 						if flags.env != "" {
 							initArgs = append(initArgs, "--environment", flags.env)
 						} else {
@@ -648,7 +648,7 @@ func ensureProject(ctx context.Context, flags *initFlags, azdClient *azdext.AzdC
 		fmt.Println("Let's get your project initialized.")
 
 		// Environment creation is handled separately in ensureEnvironment
-		initArgs := []string{"init", "-t", "Azure-Samples/azd-ai-starter-basic", "."}
+		initArgs := []string{"init", "-t", "Azure-Samples/azd-ai-starter-basic"}
 		if flags.env != "" {
 			initArgs = append(initArgs, "--environment", flags.env)
 		} else {
