@@ -1823,6 +1823,15 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		fmt.Printf("To deploy your agent, use %s.\n",
 			color.HiBlueString("azd deploy %s", a.serviceNameOverride))
 	} else {
+		// If the project was created in a subdirectory, tell the user to cd into it first.
+		if projResp, err := a.azdClient.Project().Get(ctx, &azdext.EmptyRequest{}); err == nil &&
+			projResp.Project != nil {
+			cwd, _ := os.Getwd()
+			if cwd != "" && projResp.Project.Path != cwd {
+				fmt.Printf("\nFirst, change into the project directory:\n  %s\n\n",
+					color.HiBlueString("cd %s", projResp.Project.Path))
+			}
+		}
 		fmt.Printf(
 			"To provision and deploy the whole solution, use %s.\n",
 			color.HiBlueString("azd up"),
