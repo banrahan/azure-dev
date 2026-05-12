@@ -1819,13 +1819,15 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		a.serviceNameOverride,
 	)
 
-	// If the project was created in a subdirectory, tell the user to cd into it first.
+	// Check if the user needs to cd into the project directory first.
+	needsCd := false
+	cdCmd := ""
 	if projResp, err := a.azdClient.Project().Get(ctx, &azdext.EmptyRequest{}); err == nil &&
 		projResp.Project != nil {
 		cwd, _ := os.Getwd()
 		if cwd != "" && projResp.Project.Path != cwd {
-			fmt.Printf("\nFirst, change into the project directory:\n  %s\n",
-				color.HiBlueString("cd %s", projResp.Project.Path))
+			needsCd = true
+			cdCmd = fmt.Sprintf("cd %s", projResp.Project.Path)
 		}
 	}
 
@@ -1833,12 +1835,23 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		EnvName: a.environment.Name,
 		Key:     "AZURE_AI_PROJECT_ID",
 	}); projectID != nil && projectID.Value != "" {
-		fmt.Printf("\nTo deploy your agent, use %s.\n",
-			color.HiBlueString("azd deploy %s", a.serviceNameOverride))
+		if needsCd {
+			fmt.Printf("\nTo deploy your agent:\n  %s && %s\n",
+				color.HiBlueString(cdCmd),
+				color.HiBlueString("azd deploy %s", a.serviceNameOverride))
+		} else {
+			fmt.Printf("\nTo deploy your agent:\n  %s\n",
+				color.HiBlueString("azd deploy %s", a.serviceNameOverride))
+		}
 	} else {
-		fmt.Printf("\nTo provision and deploy the whole solution, use %s.\n",
-			color.HiBlueString("azd up"),
-		)
+		if needsCd {
+			fmt.Printf("\nTo provision and deploy the whole solution:\n  %s && %s\n",
+				color.HiBlueString(cdCmd),
+				color.HiBlueString("azd up"))
+		} else {
+			fmt.Printf("\nTo provision and deploy the whole solution:\n  %s\n",
+				color.HiBlueString("azd up"))
+		}
 	}
 	return nil
 }
