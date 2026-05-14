@@ -575,6 +575,13 @@ func (a *InitAction) Run(ctx context.Context) error {
 			return fmt.Errorf("downloading agent.yaml: %w", err)
 		}
 
+		// targetDir is relative (for azure.yaml registration).
+		// Resolve absolute path for file operations.
+		absTargetDir := targetDir
+		if !filepath.IsAbs(targetDir) {
+			absTargetDir = filepath.Join(a.projectConfig.Path, targetDir)
+		}
+
 		// Model configuration: prompt user for "use existing" vs "deploy new"
 		agentManifest, err = a.configureModelChoice(ctx, agentManifest)
 		if err != nil {
@@ -613,7 +620,7 @@ func (a *InitAction) Run(ctx context.Context) error {
 		}
 
 		// Write the final agent.yaml to disk (after deployment names have been injected)
-		if err := writeAgentDefinitionFile(targetDir, agentManifest); err != nil {
+		if err := writeAgentDefinitionFile(absTargetDir, agentManifest); err != nil {
 			return fmt.Errorf("writing agent definition: %w", err)
 		}
 
@@ -625,7 +632,7 @@ func (a *InitAction) Run(ctx context.Context) error {
 		// Promote agent instruction files (CLAUDE.md, .github/copilot-instructions.md)
 		// from the sample's src/ directory to the project root so that AI coding
 		// assistants pick them up automatically.
-		promoteAgentInstructions(targetDir, a.projectConfig.Path)
+		promoteAgentInstructions(absTargetDir, a.projectConfig.Path)
 
 		// Clone Copilot skills for Foundry agents into the project when enabled.
 		if _, ok := os.LookupEnv("AZD_AGENT_CLONE_SKILLS"); ok {
@@ -1369,10 +1376,10 @@ func (a *InitAction) downloadAgentYaml(
 	agentId := agentManifest.Name
 	serviceName := strings.ReplaceAll(agentId, " ", "")
 
-	// Use targetDir if provided, otherwise default to "src/{agentId}" under the project root
+	// Use targetDir if provided, otherwise default to "src/{agentId}"
 	autoDir := targetDir == ""
 	if autoDir {
-		targetDir = filepath.Join(a.projectConfig.Path, "src", agentId)
+		targetDir = filepath.Join("src", agentId)
 	}
 
 	// When the target directory was auto-computed (no --src flag), check for
@@ -1389,10 +1396,17 @@ func (a *InitAction) downloadAgentYaml(
 	}
 	a.serviceNameOverride = serviceName
 
+	// Resolve the absolute target directory for file operations.
+	// targetDir stays relative for azure.yaml service registration.
+	absTargetDir := targetDir
+	if !filepath.IsAbs(targetDir) {
+		absTargetDir = filepath.Join(a.projectConfig.Path, targetDir)
+	}
+
 	// Safety checks for local container-based agents should happen before prompting for model SKU, etc.
 	if a.isLocalFilePath(manifestPointer) {
 		if _, isContainerAgent := agentManifest.Template.(agent_yaml.ContainerAgent); isContainerAgent {
-			if err := a.validateLocalContainerAgentCopy(ctx, manifestPointer, targetDir); err != nil {
+			if err := a.validateLocalContainerAgentCopy(ctx, manifestPointer, absTargetDir); err != nil {
 				return nil, "", err
 			}
 		}
@@ -1400,8 +1414,8 @@ func (a *InitAction) downloadAgentYaml(
 
 	// Create target directory if it doesn't exist
 	//nolint:gosec // project scaffold directory should be readable and traversable
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return nil, "", fmt.Errorf("creating target directory %s: %w", targetDir, err)
+	if err := os.MkdirAll(absTargetDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("creating target directory %s: %w", absTargetDir, err)
 	}
 
 	if a.isLocalFilePath(manifestPointer) {
@@ -1417,14 +1431,14 @@ func (a *InitAction) downloadAgentYaml(
 			if err != nil {
 				return nil, "", fmt.Errorf("resolving manifest directory %s: %w", manifestDir, err)
 			}
-			dstAbs, err := filepath.Abs(targetDir)
+			dstAbs, err := filepath.Abs(absTargetDir)
 			if err != nil {
-				return nil, "", fmt.Errorf("resolving target directory %s: %w", targetDir, err)
+				return nil, "", fmt.Errorf("resolving target directory %s: %w", absTargetDir, err)
 			}
 			log.Printf("[LOCAL-DEBUG] copyDirectory: srcAbs=%q dstAbs=%q isSamePath=%v", srcAbs, dstAbs, isSamePath(srcAbs, dstAbs))
 			if !isSamePath(srcAbs, dstAbs) {
 				log.Print("[LOCAL-DEBUG] Copying full directory for container agent")
-				err := copyDirectory(manifestDir, targetDir)
+				err := copyDirectory(manifestDir, absTargetDir)
 				if err != nil {
 					return nil, "", fmt.Errorf("copying parent directory: %w", err)
 				}
@@ -1437,7 +1451,7 @@ func (a *InitAction) downloadAgentYaml(
 		if isHostedContainer {
 			// For container agents, download the entire parent directory
 			log.Print("Downloading full directory for container agent")
-			err := downloadParentDirectory(ctx, urlInfo, targetDir, ghCli, console, useGhCli, a.httpClient)
+			err := downloadParentDirectory(ctx, urlInfo, absTargetDir, ghCli, console, useGhCli, a.httpClient)
 			if err != nil {
 				return nil, "", exterrors.Dependency(
 					exterrors.CodeGitHubDownloadFailed,
