@@ -1836,7 +1836,7 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		Key:     "AZURE_AI_PROJECT_ID",
 	}); projectID != nil && projectID.Value != "" {
 		if needsCd {
-			fmt.Printf("\nTo deploy your agent:\n  %s && %s\n",
+			fmt.Printf("\nTo deploy your agent:\n  %s\n  %s\n",
 				color.HiBlueString(cdCmd),
 				color.HiBlueString("azd deploy %s", a.serviceNameOverride))
 		} else {
@@ -1845,7 +1845,7 @@ func (a *InitAction) addToProject(ctx context.Context, targetDir string, agentMa
 		}
 	} else {
 		if needsCd {
-			fmt.Printf("\nTo provision and deploy the whole solution:\n  %s && %s\n",
+			fmt.Printf("\nTo provision and deploy the whole solution:\n  %s\n  %s\n",
 				color.HiBlueString(cdCmd),
 				color.HiBlueString("azd up"))
 		} else {
