@@ -729,16 +729,12 @@ a reusable sample or manifest.`,
 					case TemplateTypeAzd:
 						// Full azd template - dispatch azd init -t <repo>
 						// Create project in a new subdirectory derived from the template title.
-						title := selectedTemplate.Title
-						if idx := strings.IndexByte(title, '('); idx >= 0 {
-							title = strings.TrimSpace(title[:idx])
-						}
-						folderName := sanitizeAgentName(title)
+						folderName := sanitizeAgentName(selectedTemplate.Title)
 						initArgs := []string{"init", "-t", selectedTemplate.Source, folderName}
 						if flags.env != "" {
 							initArgs = append(initArgs, "--environment", flags.env)
 						} else {
-							defaultEnvName := sanitizeAgentName(title + "-dev")
+							defaultEnvName := sanitizeAgentName(selectedTemplate.Title + "-dev")
 							initArgs = append(
 								initArgs, "--environment", defaultEnvName,
 							)
@@ -808,11 +804,7 @@ a reusable sample or manifest.`,
 					default:
 						// Agent manifest template - use existing -m flow.
 						// Create project in a new subdirectory derived from the template title.
-						title := selectedTemplate.Title
-						if idx := strings.IndexByte(title, '('); idx >= 0 {
-							title = strings.TrimSpace(title[:idx])
-						}
-						folderName := sanitizeAgentName(title)
+						folderName := folderNameFromTitle(selectedTemplate.Title)
 						// Check whether the target directory already exists so we
 						// only report "created" when a new directory was made.
 						_, dirExisted := os.Stat(folderName)
