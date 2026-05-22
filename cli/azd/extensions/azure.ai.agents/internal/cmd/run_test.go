@@ -4,12 +4,23 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/azure/azure-dev/cli/azd/pkg/azdext"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestParseCommand(t *testing.T) {
@@ -171,6 +182,226 @@ func TestResolveVenvCommand(t *testing.T) {
 	})
 }
 
+func TestRunCommandNoInspectorFlag(t *testing.T) {
+	t.Parallel()
+
+	cmd := newRunCommand(nil)
+	if cmd.Flags().Lookup("no-inspector") == nil {
+		t.Fatal("run command should expose --no-inspector")
+	}
+}
+
+func TestWaitForLocalPort(t *testing.T) {
+	t.Parallel()
+
+	t.Run("succeeds when port is listening", func(t *testing.T) {
+		t.Parallel()
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := waitForLocalPort(t.Context(), port, 10*time.Millisecond); err != nil {
+			t.Fatalf("waitForLocalPort returned error: %v", err)
+		}
+	})
+
+	t.Run("returns when context expires", func(t *testing.T) {
+		t.Parallel()
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
+		defer cancel()
+
+		if err := waitForLocalPort(ctx, port, 5*time.Millisecond); err == nil {
+			t.Fatal("waitForLocalPort should fail for a closed port")
+		}
+	})
+}
+
+func TestLaunchInspectorUsesWorkflowCommand(t *testing.T) {
+	t.Parallel()
+
+	workflow := &recordingWorkflowClient{}
+	if err := launchInspector(t.Context(), workflow, 9090); err != nil {
+		t.Fatalf("launchInspector returned error: %v", err)
+	}
+
+	if workflow.request == nil || workflow.request.Workflow == nil || len(workflow.request.Workflow.Steps) != 1 {
+		t.Fatalf("unexpected workflow request: %#v", workflow.request)
+	}
+
+	got := workflow.request.Workflow.Steps[0].Command.Args
+	want := []string{"ai", "inspector", "launch", "--port", "9090", "--silent"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("workflow args = %v, want %v", got, want)
+	}
+}
+
+func TestInspectorLaunchWarningForMissingExtension(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "unknown command",
+			err:  status.Error(codes.Internal, `failed to run workflow: unknown command "inspector" for "azd ai"`),
+		},
+		{
+			name: "unknown flag from unresolved extension command",
+			err: status.Error(
+				codes.Internal,
+				`error executing step command 'ai inspector launch --port 8088 --silent': unknown flag: --port`,
+			),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := inspectorLaunchWarning(tt.err)
+			if !strings.Contains(got, "azd extension install azure.ai.inspector") {
+				t.Fatalf("warning should include install guidance, got %q", got)
+			}
+		})
+	}
+}
+
+func TestInspectorLaunchFailureOnlyWarns(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	workflow := &recordingWorkflowClient{
+		err:    status.Error(codes.Internal, "boom"),
+		called: make(chan struct{}),
+	}
+	var stderr lockedBuffer
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	startInspectorAfterAgentReadyWithOptions(
+		ctx,
+		workflow,
+		ln.Addr().(*net.TCPAddr).Port,
+		time.Second,
+		time.Millisecond,
+		&stderr,
+	)
+
+	select {
+	case <-workflow.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("inspector workflow was not called")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for !strings.Contains(stderr.String(), "Warning: Agent Inspector was not launched") {
+		select {
+		case <-deadline:
+			t.Fatalf("stderr = %q, want inspector warning", stderr.String())
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestShouldWarnLoadAzdEnvironmentFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "default environment missing is normal for local-only projects",
+			err:  status.Error(codes.Unknown, "default environment not found"),
+		},
+		{
+			name: "other environment error warns",
+			err:  status.Error(codes.Unknown, "environment service unavailable"),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := shouldWarnLoadAzdEnvironmentFailure(tt.err); got != tt.want {
+				t.Fatalf("shouldWarnLoadAzdEnvironmentFailure() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNoInspectorSkipsWorkflowLaunch(t *testing.T) {
+	t.Parallel()
+
+	workflow := &recordingWorkflowClient{called: make(chan struct{})}
+	handleInspectorAutoLaunch(t.Context(), workflow, 8088, true, true, nil, io.Discard)
+
+	select {
+	case <-workflow.called:
+		t.Fatal("--no-inspector should skip workflow launch")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+type recordingWorkflowClient struct {
+	request *azdext.RunWorkflowRequest
+	err     error
+	called  chan struct{}
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
+}
+
+func (c *recordingWorkflowClient) Run(
+	_ context.Context,
+	request *azdext.RunWorkflowRequest,
+	_ ...grpc.CallOption,
+) (*azdext.EmptyResponse, error) {
+	c.request = request
+	if c.called != nil {
+		close(c.called)
+	}
+	return &azdext.EmptyResponse{}, c.err
+}
+
 // createVenv sets up a minimal .venv directory structure for testing.
 // Returns the path to the .venv directory.
 func createVenv(t *testing.T, projectDir string) string {
@@ -202,15 +433,14 @@ func createVenv(t *testing.T, projectDir string) string {
 func TestAppendFoundryEnvVars(t *testing.T) {
 	t.Parallel()
 
-	t.Run("maps AZURE_AI_PROJECT_ENDPOINT to FOUNDRY_PROJECT_ENDPOINT", func(t *testing.T) {
+	t.Run("does not map FOUNDRY_PROJECT_ENDPOINT to itself", func(t *testing.T) {
 		t.Parallel()
 		azdEnv := map[string]string{
-			"AZURE_AI_PROJECT_ENDPOINT": "https://myaccount.services.ai.azure.com/api/projects/myproject",
+			"FOUNDRY_PROJECT_ENDPOINT": "https://myaccount.services.ai.azure.com/api/projects/myproject",
 		}
 		env := appendFoundryEnvVars(nil, azdEnv, "")
-		expected := "FOUNDRY_PROJECT_ENDPOINT=https://myaccount.services.ai.azure.com/api/projects/myproject"
-		if !slices.Contains(env, expected) {
-			t.Errorf("expected %q in env, got %v", expected, env)
+		if len(env) != 0 {
+			t.Errorf("expected no translated env vars, got %v", env)
 		}
 	})
 
@@ -253,24 +483,23 @@ func TestAppendFoundryEnvVars(t *testing.T) {
 	t.Run("includes all mappings together", func(t *testing.T) {
 		t.Parallel()
 		azdEnv := map[string]string{
-			"AZURE_AI_PROJECT_ENDPOINT": "https://acct.services.ai.azure.com/api/projects/proj",
-			"AZURE_AI_PROJECT_ID":       "/subscriptions/sub/rg/rg/acct/proj",
-			"AGENT_AGENT1_NAME":         "agent1",
-			"AGENT_AGENT1_VERSION":      "v1",
+			"FOUNDRY_PROJECT_ENDPOINT": "https://acct.services.ai.azure.com/api/projects/proj",
+			"AZURE_AI_PROJECT_ID":      "/subscriptions/sub/rg/rg/acct/proj",
+			"AGENT_AGENT1_NAME":        "agent1",
+			"AGENT_AGENT1_VERSION":     "v1",
 		}
 		env := appendFoundryEnvVars(nil, azdEnv, "agent1")
-		if len(env) != 4 {
-			t.Errorf("expected 4 env vars, got %d: %v", len(env), env)
+		if len(env) != 3 {
+			t.Errorf("expected 3 env vars, got %d: %v", len(env), env)
 		}
 	})
 
 	t.Run("skips foundry key when already set in azd env", func(t *testing.T) {
 		t.Parallel()
 		azdEnv := map[string]string{
-			"AZURE_AI_PROJECT_ENDPOINT": "https://from-azd.services.ai.azure.com",
-			"FOUNDRY_PROJECT_ENDPOINT":  "https://explicit.services.ai.azure.com",
-			"AGENT_MY_SVC_NAME":         "my-agent",
-			"FOUNDRY_AGENT_NAME":        "explicit-agent",
+			"FOUNDRY_PROJECT_ENDPOINT": "https://explicit.services.ai.azure.com",
+			"AGENT_MY_SVC_NAME":        "my-agent",
+			"FOUNDRY_AGENT_NAME":       "explicit-agent",
 		}
 		env := appendFoundryEnvVars(nil, azdEnv, "my-svc")
 
@@ -300,10 +529,10 @@ func TestAppendFoundryEnvVars(t *testing.T) {
 			"FOUNDRY_AGENT_NAME=shell-agent",
 		}
 		azdEnv := map[string]string{
-			"AZURE_AI_PROJECT_ENDPOINT": "https://from-azd.services.ai.azure.com",
-			"AZURE_AI_PROJECT_ID":       "/subscriptions/sub/rg/rg/acct/proj",
-			"AGENT_MY_SVC_NAME":         "my-agent",
-			"AGENT_MY_SVC_VERSION":      "v2",
+			"FOUNDRY_PROJECT_ENDPOINT": "https://from-azd.services.ai.azure.com",
+			"AZURE_AI_PROJECT_ID":      "/subscriptions/sub/rg/rg/acct/proj",
+			"AGENT_MY_SVC_NAME":        "my-agent",
+			"AGENT_MY_SVC_VERSION":     "v2",
 		}
 		env := appendFoundryEnvVars(existingEnv, azdEnv, "my-svc")
 
@@ -406,7 +635,7 @@ func TestAppendPortEnvVars(t *testing.T) {
 		if len(env) != 4 {
 			t.Errorf("expected 4 entries (2 existing + PORT + ASPNETCORE_URLS), got %d: %v", len(env), env)
 		}
-		if env[0] != "HOME=/home/user" || env[1] != "PATH=/usr/bin" {
+		if !slices.Contains(env, "HOME=/home/user") || !slices.Contains(env, "PATH=/usr/bin") {
 			t.Errorf("existing entries not preserved, got %v", env)
 		}
 	})
