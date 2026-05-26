@@ -1153,30 +1153,6 @@ func TestInjectToolboxEnvVarsIntoDefinition_NoopWithoutToolboxes(t *testing.T) {
 	}
 }
 
-func TestToolboxMCPEndpointEnvKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"simple", "my-tools", "TOOLBOX_MY_TOOLS_MCP_ENDPOINT"},
-		{"spaces", "my tools", "TOOLBOX_MY_TOOLS_MCP_ENDPOINT"},
-		{"mixed", "agent-tools v2", "TOOLBOX_AGENT_TOOLS_V2_MCP_ENDPOINT"},
-		{"already upper", "TOOLS", "TOOLBOX_TOOLS_MCP_ENDPOINT"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := toolboxMCPEndpointEnvKey(tt.input)
-			if got != tt.expected {
-				t.Errorf("toolboxMCPEndpointEnvKey(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestExtractConnectionConfigs_SurfacesCredentialsType(t *testing.T) {
 	t.Parallel()
 
@@ -2505,5 +2481,82 @@ func TestDownloadAgentYaml_NoPromptManifestInSrcWithoutForce(t *testing.T) {
 	}
 	if !strings.Contains(localErr.Suggestion, "--force") {
 		t.Errorf("suggestion should mention --force, got: %s", localErr.Suggestion)
+	}
+}
+
+func TestCodeDeployFlagValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		flags          initFlags
+		wantErr        bool
+		wantErrContain string
+	}{
+		{
+			name:    "code deploy with all required flags passes validation",
+			flags:   initFlags{noPrompt: true, deployMode: "code", runtime: "python_3_13", entryPoint: "app.py"},
+			wantErr: false,
+		},
+		{
+			name:           "code deploy without runtime fails",
+			flags:          initFlags{noPrompt: true, deployMode: "code", entryPoint: "app.py"},
+			wantErr:        true,
+			wantErrContain: "--runtime is required",
+		},
+		{
+			name:           "code deploy without entry-point fails",
+			flags:          initFlags{noPrompt: true, deployMode: "code", runtime: "python_3_13"},
+			wantErr:        true,
+			wantErrContain: "--entry-point is required",
+		},
+		{
+			name:    "container deploy without runtime/entry-point passes",
+			flags:   initFlags{noPrompt: true, deployMode: "container"},
+			wantErr: false,
+		},
+		{
+			name:    "code deploy without noPrompt skips validation",
+			flags:   initFlags{noPrompt: false, deployMode: "code"},
+			wantErr: false,
+		},
+		{
+			name:           "invalid deploy-mode value fails",
+			flags:          initFlags{noPrompt: true, deployMode: "invalid"},
+			wantErr:        true,
+			wantErrContain: "--deploy-mode must be",
+		},
+		{
+			name:           "invalid runtime value fails",
+			flags:          initFlags{noPrompt: true, deployMode: "code", runtime: "node_20", entryPoint: "app.js"},
+			wantErr:        true,
+			wantErrContain: "--runtime must be one of",
+		},
+		{
+			name:           "invalid dep-resolution value fails",
+			flags:          initFlags{noPrompt: true, deployMode: "code", runtime: "python_3_13", entryPoint: "app.py", depResolution: "invalid"},
+			wantErr:        true,
+			wantErrContain: "--dep-resolution must be",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a := &InitAction{flags: &tt.flags}
+			err := a.validateCodeDeployFlags()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.wantErrContain) {
+					t.Errorf("error = %q, want containing %q", err.Error(), tt.wantErrContain)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }

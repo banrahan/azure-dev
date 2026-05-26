@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"azureaiagent/internal/cmd/nextstep"
 	"azureaiagent/internal/exterrors"
 	"azureaiagent/internal/pkg/agents/agent_yaml"
 	"azureaiagent/internal/project"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	posixpath "path"
@@ -72,6 +74,13 @@ func (a *InitFromCodeAction) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to convert src path to relative path: %w", err)
 		}
 		a.flags.src = relPath
+	}
+
+	// Validate code deploy flags
+	if err := validateCodeDeployInput(
+		a.flags.noPrompt, a.flags.deployMode, a.flags.runtime, a.flags.entryPoint, a.flags.depResolution,
+	); err != nil {
+		return err
 	}
 
 	// Default src to current directory when not specified
@@ -140,16 +149,21 @@ func (a *InitFromCodeAction) Run(ctx context.Context) error {
 		validatePostInit(srcDir, localDefinition.CodeConfiguration)
 
 		fmt.Println("\nYou can customize environment variables and other settings in the agent.yaml.")
-		if projectID, _ := a.azdClient.Environment().GetValue(ctx, &azdext.GetEnvRequest{
-			EnvName: a.environment.Name,
-			Key:     "AZURE_AI_PROJECT_ID",
-		}); projectID != nil && projectID.Value != "" && !a.needsProvision {
-			fmt.Printf("Next steps: Run %s to deploy your agent to Microsoft Foundry.\n",
-				color.HiBlueString("azd deploy %s", localDefinition.Name))
-		} else {
-			fmt.Printf("Next steps: Run %s to deploy your agent to Microsoft Foundry.\n",
-				color.HiBlueString("azd up"))
-		}
+
+		// Delegate the trailing Next: block to the shared nextstep
+		// resolver — the same path used by the manifest-driven init
+		// flow (see InitAction.addToProject). The resolver inspects
+		// the current azd environment, the pending-provision signal,
+		// each agent.yaml's references to user-supplied variables,
+		// and emits context-aware guidance (`azd provision` when infra
+		// outputs are unset or pending, `azd env set <KEY>` lines when
+		// agent.yaml references unset user-supplied variables, or
+		// `azd ai agent run` when everything is configured). All paths
+		// terminate with the deploy hint. State-assembly errors are
+		// intentionally ignored: the resolver degrades gracefully on
+		// partial state per the design spec.
+		state, _ := nextstep.AssembleState(ctx, a.azdClient)
+		_ = printAllNextIfTerminal(os.Stdout, nextstep.ResolveAfterInit(state))
 	}
 
 	return nil
@@ -487,7 +501,7 @@ func (a *InitFromCodeAction) createDefinitionFromLocalAgent(ctx context.Context)
 		srcDir, _ = os.Getwd()
 	}
 	showCodeDeploy := isPythonProject(srcDir) || isDotnetProject(srcDir)
-	deployMode, err := promptDeployMode(ctx, a.azdClient, a.flags.noPrompt, showCodeDeploy)
+	deployMode, err := promptDeployMode(ctx, a.azdClient, a.flags.noPrompt, showCodeDeploy, a.flags.deployMode)
 	if err != nil {
 		return nil, err
 	}
@@ -719,6 +733,16 @@ func (a *InitFromCodeAction) createDefinitionFromLocalAgent(ctx context.Context)
 		if err := setEnvValue(ctx, a.azdClient, a.environment.Name, "AZURE_AI_MODEL_DEPLOYMENT_NAME", existingDeployment.Name); err != nil {
 			return nil, fmt.Errorf("failed to set AZURE_AI_MODEL_DEPLOYMENT_NAME: %w", err)
 		}
+
+		// Existing deployment chosen — clear any prior
+		// model_deployment tag so re-init that swaps from
+		// new-deployment back to existing doesn't leave the
+		// trailer stuck on `azd provision`.
+		if err := updatePendingModelDeploymentSignal(
+			ctx, a.azdClient, a.environment.Name, true, false,
+		); err != nil {
+			log.Printf("warning: failed to update model_deployment provision signal: %v", err)
+		}
 	} else if selectedModel != nil {
 		modelDetails, err := a.resolveSelectedModelDeployment(ctx, selectedModel)
 		if err != nil {
@@ -746,6 +770,17 @@ func (a *InitFromCodeAction) createDefinitionFromLocalAgent(ctx context.Context)
 
 		if err := setEnvValue(ctx, a.azdClient, a.environment.Name, "AZURE_AI_MODEL_DEPLOYMENT_NAME", modelDetails.ModelName); err != nil {
 			return nil, fmt.Errorf("failed to set AZURE_AI_MODEL_DEPLOYMENT_NAME: %w", err)
+		}
+
+		// New model deployment configured — record that the
+		// post-init trailer should suggest `azd provision`. See
+		// pending_provision.go for the lifecycle contract: this
+		// tag is cleared by postprovisionHandler after a
+		// successful provision.
+		if err := updatePendingModelDeploymentSignal(
+			ctx, a.azdClient, a.environment.Name, true, true,
+		); err != nil {
+			log.Printf("warning: failed to update model_deployment provision signal: %v", err)
 		}
 	}
 
@@ -1015,7 +1050,11 @@ func (a *InitFromCodeAction) addToProject(ctx context.Context, targetDir string,
 
 // promptCodeConfiguration prompts the user for code deploy configuration settings.
 func (a *InitFromCodeAction) promptCodeConfiguration(ctx context.Context, srcDir string) (*agent_yaml.CodeConfiguration, error) {
-	return promptCodeConfig(ctx, a.azdClient, srcDir, a.flags.noPrompt)
+	return promptCodeConfig(ctx, a.azdClient, srcDir, a.flags.noPrompt, codeDeployOptions{
+		runtime:       a.flags.runtime,
+		entryPoint:    a.flags.entryPoint,
+		depResolution: a.flags.depResolution,
+	})
 }
 
 // protocolInfo pairs a protocol name with the default version used when generating agent.yaml.
@@ -1142,20 +1181,35 @@ func knownProtocolNames() string {
 }
 
 // promptDeployMode asks the user to choose between code deploy and container deploy.
-// When noPrompt is true, defaults to "container" for backward compatibility.
-// When showCodeDeploy is false, code deploy is not offered (e.g. for non-Python languages).
-func promptDeployMode(ctx context.Context, azdClient *azdext.AzdClient, noPrompt bool, showCodeDeploy bool) (string, error) {
+// When deployModeFlag is set, it is used directly (for --no-prompt with explicit flag).
+// When noPrompt is true and no flag is provided, defaults to "container" for backward compatibility.
+// When showCodeDeploy is false and no explicit flag overrides, code deploy is not offered.
+func promptDeployMode(ctx context.Context, azdClient *azdext.AzdClient, noPrompt bool, showCodeDeploy bool, deployModeFlag string) (string, error) {
+	// Explicit flag takes precedence
+	if deployModeFlag != "" {
+		switch deployModeFlag {
+		case "container", "code":
+			return deployModeFlag, nil
+		default:
+			return "", exterrors.Validation(
+				exterrors.CodeInvalidParameter,
+				fmt.Sprintf("invalid --deploy-mode value %q; must be 'container' or 'code'", deployModeFlag),
+				"Use --deploy-mode container or --deploy-mode code",
+			)
+		}
+	}
+
 	if !showCodeDeploy {
+		return "container", nil
+	}
+
+	if noPrompt {
 		return "container", nil
 	}
 
 	deployModeChoices := []*azdext.SelectChoice{
 		{Label: "Container Image (Docker)", Value: "container"},
 		{Label: "Source Code (ZIP upload)", Value: "code"},
-	}
-
-	if noPrompt {
-		return "container", nil
 	}
 
 	defaultIdx := int32(0) // Container is the default for backward compatibility
@@ -1228,9 +1282,16 @@ func extractAssemblyName(csprojContent string) string {
 	return name
 }
 
+// codeDeployOptions holds optional flag overrides for code deploy configuration.
+type codeDeployOptions struct {
+	runtime       string
+	entryPoint    string
+	depResolution string
+}
+
 // promptCodeConfig prompts for code deploy configuration (runtime, entry point,
-// dependency resolution). When noPrompt is true, defaults are used without prompting.
-func promptCodeConfig(ctx context.Context, azdClient *azdext.AzdClient, srcDir string, noPrompt bool) (*agent_yaml.CodeConfiguration, error) {
+// dependency resolution). When noPrompt is true, flags or defaults are used without prompting.
+func promptCodeConfig(ctx context.Context, azdClient *azdext.AzdClient, srcDir string, noPrompt bool, opts codeDeployOptions) (*agent_yaml.CodeConfiguration, error) {
 	if srcDir == "" {
 		srcDir = "."
 	}
@@ -1259,7 +1320,9 @@ func promptCodeConfig(ctx context.Context, azdClient *azdext.AzdClient, srcDir s
 	}
 
 	var runtime string
-	if noPrompt {
+	if opts.runtime != "" {
+		runtime = opts.runtime
+	} else if noPrompt {
 		if isDotnet && !isPython {
 			runtime = "dotnet_10"
 		} else {
@@ -1287,7 +1350,9 @@ func promptCodeConfig(ctx context.Context, azdClient *azdext.AzdClient, srcDir s
 	defaultEntryPoint := detectDefaultEntryPoint(srcDir, runtime)
 
 	var entryPoint string
-	if noPrompt {
+	if opts.entryPoint != "" {
+		entryPoint = opts.entryPoint
+	} else if noPrompt {
 		entryPoint = defaultEntryPoint
 	} else {
 		entryPointResp, err := azdClient.Prompt().Prompt(ctx, &azdext.PromptRequest{
@@ -1312,7 +1377,9 @@ func promptCodeConfig(ctx context.Context, azdClient *azdext.AzdClient, srcDir s
 	}
 
 	var depResolution string
-	if noPrompt {
+	if opts.depResolution != "" {
+		depResolution = opts.depResolution
+	} else if noPrompt {
 		depResolution = "remote_build"
 	} else {
 		depDefaultIdx := int32(0)
